@@ -6,4 +6,4 @@ TODO
 - Add Derek's IP address as a verified client IP
 - Create ETL tickets
 - Derek needs to install Azure Data Studio
-- Push seed.sql (Derek)
+
