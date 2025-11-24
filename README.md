@@ -103,6 +103,82 @@ This installs all required packages for:
 ---
 
 
+## 🛠️ Database Seeding Script
+
+The project includes a script to populate the database with realistic test data for **Customers, Products, Orders, and OrderItems**. This is useful for testing, development, and analytics purposes without relying on live production data.
+
+### **File:** `seed_database.py`
+
+### **Features**
+
+* **Customers**
+
+  * Generates a configurable number of customers (`NUM_CUSTOMERS`).
+  * Random first and last names from a predefined list.
+  * Emails are mostly valid but ~20% intentionally corrupted for testing validation.
+  * Guarantees uniqueness of email addresses.
+
+* **Products**
+
+  * Inserts products from a pre-defined catalog with categories (e.g., Mobile, Audio, Computing, Appliances).
+  * Prices are mostly valid, but ~15% are intentionally corrupted to test downstream validation and reporting (negative, zero, or extreme values).
+  * Random stock quantities between 0–200.
+
+* **Orders & OrderItems**
+
+  * Creates a configurable number of orders (`NUM_ORDERS`) linked to seeded customers.
+  * Each order contains 1–5 order items with random products and quantities.
+  * Order totals are calculated and stored in the `Orders` table.
+  * Includes intentional corruption for testing (e.g., invalid order dates, slight price/quantity modifications).
+
+* **Utility Functions**
+
+  * `clear_tables()` – Clears all related tables (`Customers`, `Products`, `Orders`, `OrderItems`) before seeding.
+  * `corrupt_price()` – Safely generates invalid product prices for testing.
+  * `random_date()` – Generates a random datetime within the last 30 days.
+
+* **Safe Database Insertion**
+
+  * Uses `pandas.to_sql()` for bulk inserts.
+  * Handles duplicates and ensures SQL-safe corruption.
+  * Performs bulk updates for order totals to optimize performance.
+
+### **Configuration**
+
+Adjust the following constants at the top of the script to control seeding behavior:
+
+```python
+NUM_CUSTOMERS = 50
+NUM_PRODUCTS = 30
+NUM_ORDERS = 200
+CORRUPTION_RATE = 0.15  # proportion of intentionally corrupted data
+```
+
+### **Usage Example**
+
+Run the script directly to seed the database:
+
+```bash
+python seed_database.py
+```
+
+**Output:**
+
+```
+🧹 Tables cleared
+👥 Customers seeded: 50
+📦 Products seeded: 30
+🧾 Orders inserted: 200
+🧺 OrderItems inserted: 450
+🎉 Seeding complete!
+```
+
+This script is intended for **development and testing environments only**—do not run on production databases.
+
+---
+
+
+
 ## ETL Pipeline Overview
 
 The project implements a full ETL (Extract, Transform, Load) pipeline to process sales data from SQL Server into an analytics-ready star schema. This pipeline is designed to support dashboards, reporting, and business intelligence in Power BI.
