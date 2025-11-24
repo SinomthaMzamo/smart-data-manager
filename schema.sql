@@ -19,6 +19,7 @@ CREATE TABLE Products (
     description NVARCHAR(255),
     price DECIMAL(10,2) NOT NULL,
     stock_quantity INT DEFAULT 0,
+    category NVARCHAR(50),  
     created_at DATETIME2 DEFAULT GETDATE()
 );
  
