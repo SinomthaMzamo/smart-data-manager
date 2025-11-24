@@ -102,3 +102,87 @@ This installs all required packages for:
 
 ---
 
+
+## ETL Pipeline Overview
+
+The project implements a full ETL (Extract, Transform, Load) pipeline to process sales data from SQL Server into an analytics-ready star schema. This pipeline is designed to support dashboards, reporting, and business intelligence in Power BI.
+
+### 1. Extraction
+
+* **File:** `extract.py`
+* **Description:** Connects to the SQL Server database using `db.py` and extracts the following tables into pandas DataFrames:
+
+  * `Customers`
+  * `Products`
+  * `Orders`
+  * `OrderItems`
+* **Features:**
+
+  * Handles connection errors and empty tables.
+  * Prints a preview of extracted data for verification.
+
+### 2. Cleaning
+
+* **File:** `clean.py`
+* **Description:** Cleans and normalizes raw data before transformation.
+* **Key Steps:**
+
+  * Removes duplicates.
+  * Normalizes text (emails, names).
+  * Handles nulls and invalid values (e.g., negative prices or quantities).
+  * Adds derived fields:
+
+    * `full_name` in `Customers`
+    * `full_description` in `Products`
+    * `line_total` in `OrderItems`
+  * Logs detailed cleaning operations both to console and `transform.log`.
+
+### 3. Transformation
+
+* **File:** `transform.py`
+* **Description:** Reshapes cleaned data into analytics-ready tables following a star schema:
+
+  * **Dimensions**
+
+    * `DimCustomers`: Customer details.
+    * `DimProducts`: Product details.
+    * `DimDate`: Date dimension created from `Orders.order_date`.
+  * **Facts**
+
+    * `FactOrders`: Order-level metrics.
+    * `FactOrderItems`: Item-level metrics (quantities, line totals).
+* **Features:**
+
+  * Wraps cleaning functions for end-to-end processing.
+  * Generates additional keys (`date_key`) and derived columns.
+  * Returns a dictionary of transformed DataFrames ready for loading.
+
+### 4. Loading
+
+* **File:** `load.py`
+* **Description:** Loads transformed tables into SQL Server in proper dependency order:
+
+  1. Dimensions first (`DimCustomers`, `DimProducts`, `DimDate`)
+  2. Facts next (`FactOrders`, `FactOrderItems`)
+* **Features:**
+
+  * Supports `replace` or `append` modes.
+  * Logs success and errors to both console and `load.log`.
+
+### 5. Running the Pipeline
+
+* **File:** `run_etl_pipeline.py`
+* **Description:** Orchestrates the ETL flow end-to-end:
+
+  1. Extract raw data from SQL Server.
+  2. Clean and transform the data.
+  3. Build dimensions and facts.
+  4. Load the processed tables into SQL Server for Power BI consumption.
+
+**Usage Example:**
+
+```bash
+python run_etl_pipeline.py
+```
+
+---
