@@ -107,7 +107,7 @@ This installs all required packages for:
 
 The project includes a script to populate the database with realistic test data for **Customers, Products, Orders, and OrderItems**. This is useful for testing, development, and analytics purposes without relying on live production data.
 
-### **File:** `seed_database.py`
+### **File:** `seed.py`
 
 ### **Features**
 
