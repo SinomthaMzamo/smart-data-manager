@@ -2,7 +2,7 @@ import pandas as pd
 from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
 import logging
-from db import get_engine
+from .db import get_engine
 
 # ----------------------------
 # Logging Setup
@@ -61,6 +61,7 @@ def load_table(df: pd.DataFrame, table_name: str, if_exists="replace"):
 def load_transformed_schema(
     dim_customers,
     dim_products,
+    dim_date,
     fact_orders,
     fact_order_items,
     mode="replace"
@@ -77,6 +78,7 @@ def load_transformed_schema(
     # Load Dimensions first
     load_table(dim_customers, "DimCustomers", if_exists=mode)
     load_table(dim_products, "DimProducts", if_exists=mode)
+    load_table(dim_date, "DimDate", if_exists=mode)
 
     # Load Facts afterwards
     load_table(fact_orders, "FactOrders", if_exists=mode)

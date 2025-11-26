@@ -1,0 +1,8 @@
+2025-11-24 17:39:03,834 - INFO - === ETL Pipeline Started ===
+2025-11-24 17:39:03,834 - INFO - Starting Extraction Phase
+2025-11-24 17:39:06,058 - INFO - Extraction Phase Completed
+2025-11-24 17:39:06,059 - INFO - Starting Transformation Phase
+2025-11-24 17:39:06,143 - INFO - Transformation Phase Completed
+2025-11-24 17:39:06,144 - INFO - Starting Load Phase
+2025-11-24 17:39:10,820 - INFO - Load Phase Completed
+2025-11-24 17:39:10,820 - INFO - === ETL Pipeline Finished Successfully ===

@@ -8,3 +8,5 @@ venv/
 
 #Pycache
 __pycache__/
+
+*/.DS_Store

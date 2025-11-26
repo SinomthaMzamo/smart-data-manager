@@ -1,6 +1,6 @@
 import pandas as pd
 from datetime import datetime
-from clean import clean_customers, clean_order_items, clean_orders, clean_products, logger
+from .clean import clean_customers, clean_order_items, clean_orders, clean_products, logger
 
 
 # ----------------------------
@@ -53,10 +53,13 @@ def build_dim_products(products_df: pd.DataFrame) -> pd.DataFrame:
     return dim
 
 def build_dim_date(orders_df: pd.DataFrame) -> pd.DataFrame:
-    """Creates a date dimension using all order dates."""
-    df = pd.DataFrame()
-    unique_dates = pd.Series(pd.to_datetime(orders_df["order_date"].unique())).sort_values()
-    df["date"] = unique_dates
+    """Creates a proper date dimension using all unique calendar dates from order_date."""
+    # Normalize to date only (drop time)
+    unique_dates = pd.to_datetime(orders_df["order_date"]).dt.date.dropna().unique()
+    unique_dates = pd.Series(unique_dates).sort_values()
+
+    # Build the dimension
+    df = pd.DataFrame({"date": pd.to_datetime(unique_dates)})
     df["date_key"] = df["date"].dt.strftime("%Y%m%d").astype(int)
     df["year"] = df["date"].dt.year
     df["quarter"] = df["date"].dt.quarter
@@ -66,8 +69,10 @@ def build_dim_date(orders_df: pd.DataFrame) -> pd.DataFrame:
     df["month_name"] = df["date"].dt.month_name()
     df["is_weekend"] = df["date"].dt.dayofweek >= 5
 
-    return df
+    # Final safety‑net: ensure uniqueness
+    df = df.drop_duplicates(subset=["date_key"]).reset_index(drop=True)
 
+    return df
 
 def build_fact_orders(orders_df: pd.DataFrame) -> pd.DataFrame:
     fact = orders_df.copy()
@@ -87,10 +92,10 @@ def build_fact_order_items(order_items_df: pd.DataFrame) -> pd.DataFrame:
     fact = order_items_df.copy()
     fact = fact[[
     "order_id",
-        "product_id",
-        "quantity",
-        "price",
-        "line_total"
+    "product_id",
+    "quantity",
+    "price",
+    "line_total",
     ]]
 
     return fact

@@ -1,7 +1,7 @@
 import logging
-from extract import extract_table
-from transform import transform_all
-from load import load_transformed_schema
+from .extract import extract_table
+from .transform import transform_all
+from .load import load_transformed_schema
 
 # ----------------------------
 # Logging Setup
@@ -46,6 +46,7 @@ def run_etl():
     load_transformed_schema(
         dim_customers=transformed_data["dim_customers"],
         dim_products=transformed_data["dim_products"],
+        dim_date=transformed_data["dim_date"],
         fact_orders=transformed_data["fact_orders"],
         fact_order_items=transformed_data["fact_order_items"],
         mode="replace"  # can switch to "append" if incremental load

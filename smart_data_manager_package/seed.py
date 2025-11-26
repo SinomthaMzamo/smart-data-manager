@@ -2,7 +2,7 @@ import random
 import datetime
 import pandas as pd
 from sqlalchemy import text
-from db import get_engine
+from .db import get_engine
 
 
 # -----------------------------
@@ -13,7 +13,7 @@ NUM_PRODUCTS = 30
 NUM_ORDERS = 200
 CORRUPTION_RATE = 0.15  # 15% corrupted rows
 
-start_date = datetime.datetime.today() - datetime.timedelta(days=30)
+start_date = datetime.datetime.today() - datetime.timedelta(days=365)
 end_date = datetime.datetime.today()
 
 fake_first_names = ["John", "Jane", "Mary", "Neo", "Sizwe", "Lerato", "Amara", "Thabo", "Kyla", "Musa"]
@@ -102,6 +102,14 @@ def clear_tables(engine):
         conn.execute(text("DELETE FROM Orders"))
         conn.execute(text("DELETE FROM Products"))
         conn.execute(text("DELETE FROM Customers"))
+        conn.execute(text("DELETE FROM DailySalesSummary")) 
+        conn.execute(text("DELETE FROM CustomerSegments"))
+        conn.execute(text("DELETE FROM ProductPerformance"))  
+        conn.execute(text("DELETE FROM DimDate"))
+        conn.execute(text("DELETE FROM DimCustomers"))  
+        conn.execute(text("DELETE FROM DimProducts"))
+        conn.execute(text("DELETE FROM FactOrderItems"))  
+        conn.execute(text("DELETE FROM FactOrders")) 
     print("🧹 Tables cleared")
 
 # -----------------------------
@@ -202,7 +210,7 @@ def seed_orders_and_items(engine, NUM_ORDERS=300):
     orders = []
     for _ in range(NUM_ORDERS):
         customer_id = random.choice(customer_ids)
-        order_date = datetime.datetime.now() - datetime.timedelta(days=random.randint(0, 30))
+        order_date = datetime.datetime.now() - datetime.timedelta(days=random.randint(0, 365))
         if random.random() < CORRUPTION_RATE:
             order_date = random.choice([datetime.datetime.now() + datetime.timedelta(days=365), None])
 

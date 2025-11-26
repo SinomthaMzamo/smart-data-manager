@@ -1,6 +1,6 @@
 import pandas as pd
 from sqlalchemy import text
-from db import get_engine
+from .db import get_engine
 
 def extract_table(table_name, preview_rows=5):
     """

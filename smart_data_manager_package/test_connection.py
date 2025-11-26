@@ -1,4 +1,4 @@
-from db import get_engine
+from .db import get_engine
 from sqlalchemy import text
 
 def test_connection():
