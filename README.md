@@ -1,9 +1,5 @@
 # smart-data-manager
 
-TODO
-
-- Create ETL tickets
-
 ## 📦 Project Dependencies
  
 This project uses several Python libraries to support ETL workflows, data cleaning, reporting, and automated analytics. Below is a summary of each dependency and its role in the Smart Data Manager system.
