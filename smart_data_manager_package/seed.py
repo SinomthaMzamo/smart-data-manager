@@ -2,7 +2,8 @@ import random
 import datetime
 import pandas as pd
 from sqlalchemy import text
-from .db import get_engine
+# from .db import get_engine                # for mssql
+from .rds_db import get_engine              # for pgsql
 
 
 # -----------------------------
@@ -307,6 +308,14 @@ def seed_database():
     print("Products:", len(prod_df))
     print("Orders:", len(orders_df))
     print("OrderItems:", len(items_df))
+
+def lambda_handler(event, context):
+    """
+    AWS Lambda entry point.
+    """
+    seed_database()
+    return {"status": "success"}
+
 
 if __name__ == "__main__":
     seed_database()

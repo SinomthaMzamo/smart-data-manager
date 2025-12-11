@@ -1,0 +1,655 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'ETL Pipeline with RDS SQL Server and Lambda Functions'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name
+
+  DBUsername:
+    Type: String
+    Default: admin
+    Description: Database master username
+    MinLength: 1
+    MaxLength: 16
+
+  DBPassword:
+    Type: String
+    NoEcho: true
+    Description: Database master password
+    MinLength: 8
+    MaxLength: 41
+
+  DBName:
+    Type: String
+    Default: SmartDataManager
+    Description: Database name
+
+  VpcCIDR:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: CIDR block for VPC
+
+  PrivateSubnet1CIDR:
+    Type: String
+    Default: 10.0.1.0/24
+
+  PrivateSubnet2CIDR:
+    Type: String
+    Default: 10.0.2.0/24
+
+  PublicSubnet1CIDR:
+    Type: String
+    Default: 10.0.101.0/24
+
+  PublicSubnet2CIDR:
+    Type: String
+    Default: 10.0.102.0/24
+
+Resources:
+  # ============================================
+  # VPC and Networking
+  # ============================================
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-etl-vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-etl-igw
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Public Subnets (for NAT Gateway)
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnet1CIDR
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-public-subnet-1
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnet2CIDR
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-public-subnet-2
+
+  # Private Subnets (for Lambda and RDS)
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-private-subnet-1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-private-subnet-2
+
+  # NAT Gateway for Lambda internet access
+  NatGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-nat-gateway
+
+  # Route Tables
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-public-rt
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-private-rt
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ============================================
+  # Security Groups
+  # ============================================
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for RDS SQL Server
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 1433
+          ToPort: 1433
+          SourceSecurityGroupId: !Ref LambdaSecurityGroup
+          Description: Allow Lambda to access RDS
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-rds-sg
+
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Lambda functions
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 1433
+          ToPort: 1433
+          DestinationSecurityGroupId: !Ref RDSSecurityGroup
+          Description: Allow Lambda to connect to RDS
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: Allow HTTPS for package downloads
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-lambda-sg
+
+  # ============================================
+  # S3 Bucket for Logs and Artifacts
+  # ============================================
+  # ETLBucket:
+  #   Type: AWS::S3::Bucket
+  #   Properties:
+  #     BucketName: !Sub ${Environment}-etl-artifacts-${AWS::AccountId}
+  #     BucketEncryption:
+  #       ServerSideEncryptionConfiguration:
+  #         - ServerSideEncryptionByDefault:
+  #             SSEAlgorithm: AES256
+  #     VersioningConfiguration:
+  #       Status: Enabled
+  #     LifecycleConfiguration:
+  #       Rules:
+  #         - Id: DeleteOldLogs
+  #           Status: Enabled
+  #           ExpirationInDays: 30
+  #           NoncurrentVersionExpirationInDays: 7
+  #     Tags:
+  #       - Key: Name
+  #         Value: !Sub ${Environment}-etl-bucket
+
+  # ============================================
+  # Secrets Manager for Database Credentials
+  # ============================================
+  # DBSecret:
+  #   Type: AWS::SecretsManager::Secret
+  #   Properties:
+  #     Name: !Sub ${Environment}-etl-db-credentials
+  #     Description: Database credentials for ETL pipeline
+  #     SecretString: !Sub |
+  #       {
+  #         "username": "${DBUsername}",
+  #         "password": "${DBPassword}",
+  #         "engine": "sqlserver",
+  #         "host": "${DBInstance.Endpoint.Address}",
+  #         "port": 1433,
+  #         "dbname": "${DBName}"
+  #       }
+
+  # ============================================
+  # RDS SQL Server Instance
+  # ============================================
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for RDS
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-db-subnet-group
+
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub ${Environment}-etl-sqlserver
+      DBName: !Ref DBName
+      Engine: sqlserver-ex  # Express edition (free tier eligible)
+      # For production, use: sqlserver-se (Standard Edition)
+      EngineVersion: '15.00.4073.23.v1'  # SQL Server 2019
+      DBInstanceClass: db.t3.small  # Adjust based on workload
+      AllocatedStorage: 20  # GB, minimum for SQL Server
+      StorageType: gp2
+      StorageEncrypted: true
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      BackupRetentionPeriod: 7
+      PreferredBackupWindow: '03:00-04:00'
+      PreferredMaintenanceWindow: 'sun:04:00-sun:05:00'
+      MultiAZ: false  # Set to true for production
+      PubliclyAccessible: false
+      EnableCloudwatchLogsExports:
+        - error
+        - agent
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-etl-database
+
+  # ============================================
+  # IAM Role for Lambda Functions
+  # ============================================
+  # LambdaExecutionRole:
+  #   Type: AWS::IAM::Role
+  #   Properties:
+  #     RoleName: !Sub ${Environment}-etl-lambda-role
+  #     AssumeRolePolicyDocument:
+  #       Version: '2012-10-17'
+  #       Statement:
+  #         - Effect: Allow
+  #           Principal:
+  #             Service: lambda.amazonaws.com
+  #           Action: sts:AssumeRole
+  #     ManagedPolicyArns:
+  #       - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+  #     Policies:
+  #       - PolicyName: ETLLambdaPolicy
+  #         PolicyDocument:
+  #           Version: '2012-10-17'
+  #           Statement:
+  #             - Effect: Allow
+  #               Action:
+  #                 - logs:CreateLogGroup
+  #                 - logs:CreateLogStream
+  #                 - logs:PutLogEvents
+  #               Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${Environment}-*
+  #             - Effect: Allow
+  #               Action:
+  #                 - secretsmanager:GetSecretValue
+  #               Resource: !Ref DBSecret
+  #             - Effect: Allow
+  #               Action:
+  #                 - s3:PutObject
+  #                 - s3:GetObject
+  #                 - s3:ListBucket
+  #               Resource:
+  #                 - !GetAtt ETLBucket.Arn
+  #                 - !Sub ${ETLBucket.Arn}/*
+  #             - Effect: Allow
+  #               Action:
+  #                 - ec2:CreateNetworkInterface
+  #                 - ec2:DescribeNetworkInterfaces
+  #                 - ec2:DeleteNetworkInterface
+  #               Resource: '*'
+
+  # ============================================
+  # Lambda Layer for Dependencies
+  # ============================================
+  # Note: You need to create and upload this layer separately
+  # See instructions in the companion script
+  # ETLDependenciesLayer:
+  #   Type: AWS::Lambda::LayerVersion
+  #   Properties:
+  #     LayerName: !Sub ${Environment}-etl-dependencies
+  #     Description: Python dependencies for ETL (pandas, SQLAlchemy, pyodbc)
+  #     Content:
+  #       S3Bucket: !Ref ETLBucket
+  #       S3Key: layers/etl-dependencies.zip  # Upload this first
+  #     CompatibleRuntimes:
+  #       - python3.11
+  #       - python3.10
+
+  # ============================================
+  # Lambda Functions
+  # ============================================
+  # SeedFunction:
+  #   Type: AWS::Lambda::Function
+  #   DependsOn: DBInstance
+  #   Properties:
+  #     FunctionName: !Sub ${Environment}-etl-seed
+  #     Description: Seed database with test data
+  #     Runtime: python3.11
+  #     Handler: seed.seed_database
+  #     Role: !GetAtt LambdaExecutionRole.Arn
+  #     Code:
+  #       S3Bucket: !Ref ETLBucket
+  #       S3Key: functions/seed.zip  # Upload your packaged code
+  #     Layers:
+  #       - !Ref ETLDependenciesLayer
+  #     Timeout: 900  # 15 minutes
+  #     MemorySize: 2048
+  #     Environment:
+  #       Variables:
+  #         DB_SECRET_ARN: !Ref DBSecret
+  #         ENVIRONMENT: !Ref Environment
+  #     VpcConfig:
+  #       SecurityGroupIds:
+  #         - !Ref LambdaSecurityGroup
+  #       SubnetIds:
+  #         - !Ref PrivateSubnet1
+  #         - !Ref PrivateSubnet2
+
+  # ExtractFunction:
+  #   Type: AWS::Lambda::Function
+  #   Properties:
+  #     FunctionName: !Sub ${Environment}-etl-extract
+  #     Description: Extract data from SQL Server
+  #     Runtime: python3.11
+  #     Handler: extract.extract_all
+  #     Role: !GetAtt LambdaExecutionRole.Arn
+  #     Code:
+  #       S3Bucket: !Ref ETLBucket
+  #       S3Key: functions/extract.zip
+  #     Layers:
+  #       - !Ref ETLDependenciesLayer
+  #     Timeout: 900
+  #     MemorySize: 2048
+  #     Environment:
+  #       Variables:
+  #         DB_SECRET_ARN: !Ref DBSecret
+  #         S3_BUCKET: !Ref ETLBucket
+  #         ENVIRONMENT: !Ref Environment
+  #     VpcConfig:
+  #       SecurityGroupIds:
+  #         - !Ref LambdaSecurityGroup
+  #       SubnetIds:
+  #         - !Ref PrivateSubnet1
+  #         - !Ref PrivateSubnet2
+
+  # TransformFunction:
+  #   Type: AWS::Lambda::Function
+  #   Properties:
+  #     FunctionName: !Sub ${Environment}-etl-transform
+  #     Description: Transform data into star schema
+  #     Runtime: python3.11
+  #     Handler: transform.transform_all
+  #     Role: !GetAtt LambdaExecutionRole.Arn
+  #     Code:
+  #       S3Bucket: !Ref ETLBucket
+  #       S3Key: functions/transform.zip
+  #     Layers:
+  #       - !Ref ETLDependenciesLayer
+  #     Timeout: 900
+  #     MemorySize: 3008
+  #     Environment:
+  #       Variables:
+  #         S3_BUCKET: !Ref ETLBucket
+  #         ENVIRONMENT: !Ref Environment
+  #     VpcConfig:
+  #       SecurityGroupIds:
+  #         - !Ref LambdaSecurityGroup
+  #       SubnetIds:
+  #         - !Ref PrivateSubnet1
+  #         - !Ref PrivateSubnet2
+
+  # LoadFunction:
+  #   Type: AWS::Lambda::Function
+  #   Properties:
+  #     FunctionName: !Sub ${Environment}-etl-load
+  #     Description: Load transformed data into SQL Server
+  #     Runtime: python3.11
+  #     Handler: load.load_transformed_schema
+  #     Role: !GetAtt LambdaExecutionRole.Arn
+  #     Code:
+  #       S3Bucket: !Ref ETLBucket
+  #       S3Key: functions/load.zip
+  #     Layers:
+  #       - !Ref ETLDependenciesLayer
+  #     Timeout: 900
+  #     MemorySize: 2048
+  #     Environment:
+  #       Variables:
+  #         DB_SECRET_ARN: !Ref DBSecret
+  #         ENVIRONMENT: !Ref Environment
+  #     VpcConfig:
+  #       SecurityGroupIds:
+  #         - !Ref LambdaSecurityGroup
+  #       SubnetIds:
+  #         - !Ref PrivateSubnet1
+  #         - !Ref PrivateSubnet2
+
+  # DailySalesETLFunction:
+  #   Type: AWS::Lambda::Function
+  #   Properties:
+  #     FunctionName: !Sub ${Environment}-etl-daily-sales
+  #     Description: Daily sales summary ETL
+  #     Runtime: python3.11
+  #     Handler: daily_sales_etl.run_daily_sales_etl
+  #     Role: !GetAtt LambdaExecutionRole.Arn
+  #     Code:
+  #       S3Bucket: !Ref ETLBucket
+  #       S3Key: functions/daily_sales.zip
+  #     Layers:
+  #       - !Ref ETLDependenciesLayer
+  #     Timeout: 900
+  #     MemorySize: 2048
+  #     Environment:
+  #       Variables:
+  #         DB_SECRET_ARN: !Ref DBSecret
+  #         ENVIRONMENT: !Ref Environment
+  #     VpcConfig:
+  #       SecurityGroupIds:
+  #         - !Ref LambdaSecurityGroup
+  #       SubnetIds:
+  #         - !Ref PrivateSubnet1
+  #         - !Ref PrivateSubnet2
+
+  # ============================================
+  # CloudWatch Log Groups
+  # ============================================
+  # SeedLogGroup:
+  #   Type: AWS::Logs::LogGroup
+  #   Properties:
+  #     LogGroupName: !Sub /aws/lambda/${Environment}-etl-seed
+  #     RetentionInDays: 7
+
+  # ExtractLogGroup:
+  #   Type: AWS::Logs::LogGroup
+  #   Properties:
+  #     LogGroupName: !Sub /aws/lambda/${Environment}-etl-extract
+  #     RetentionInDays: 7
+
+  # TransformLogGroup:
+  #   Type: AWS::Logs::LogGroup
+  #   Properties:
+  #     LogGroupName: !Sub /aws/lambda/${Environment}-etl-transform
+  #     RetentionInDays: 7
+
+  # LoadLogGroup:
+  #   Type: AWS::Logs::LogGroup
+  #   Properties:
+  #     LogGroupName: !Sub /aws/lambda/${Environment}-etl-load
+  #     RetentionInDays: 7
+
+  # DailySalesLogGroup:
+  #   Type: AWS::Logs::LogGroup
+  #   Properties:
+  #     LogGroupName: !Sub /aws/lambda/${Environment}-etl-daily-sales
+  #     RetentionInDays: 7
+
+  # ============================================
+  # EventBridge Rule for Scheduled ETL
+  # ============================================
+  # DailyETLSchedule:
+  #   Type: AWS::Events::Rule
+  #   Properties:
+  #     Name: !Sub ${Environment}-daily-etl-schedule
+  #     Description: Trigger daily sales ETL at 2 AM
+  #     ScheduleExpression: 'cron(0 2 * * ? *)'  # 2 AM UTC daily
+  #     State: ENABLED
+  #     Targets:
+  #       - Arn: !GetAtt DailySalesETLFunction.Arn
+  #         Id: DailySalesTarget
+
+  # DailyETLPermission:
+  #   Type: AWS::Lambda::Permission
+  #   Properties:
+  #     FunctionName: !Ref DailySalesETLFunction
+  #     Action: lambda:InvokeFunction
+  #     Principal: events.amazonaws.com
+  #     SourceArn: !GetAtt DailyETLSchedule.Arn
+
+  # ============================================
+  # CloudWatch Alarms
+  # ============================================
+  RDSCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${Environment}-rds-high-cpu
+      AlarmDescription: Alert when RDS CPU exceeds 80%
+      MetricName: CPUUtilization
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref DBInstance
+
+  # LambdaErrorAlarm:
+  #   Type: AWS::CloudWatch::Alarm
+  #   Properties:
+  #     AlarmName: !Sub ${Environment}-lambda-errors
+  #     AlarmDescription: Alert on Lambda function errors
+  #     MetricName: Errors
+  #     Namespace: AWS/Lambda
+  #     Statistic: Sum
+  #     Period: 300
+  #     EvaluationPeriods: 1
+  #     Threshold: 5
+  #     ComparisonOperator: GreaterThanThreshold
+  #     TreatMissingData: notBreaching
+
+Outputs:
+  VPCId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub ${Environment}-etl-vpc-id
+
+  DBEndpoint:
+    Description: RDS SQL Server endpoint
+    Value: !GetAtt DBInstance.Endpoint.Address
+    Export:
+      Name: !Sub ${Environment}-etl-db-endpoint
+
+  DBPort:
+    Description: RDS SQL Server port
+    Value: !GetAtt DBInstance.Endpoint.Port
+    Export:
+      Name: !Sub ${Environment}-etl-db-port
+
+  DBSecretArn:
+    Description: ARN of the database credentials secret
+    Value: !Ref DBSecret
+    Export:
+      Name: !Sub ${Environment}-etl-db-secret-arn
+
+  # ETLBucketName:
+  #   Description: S3 bucket for ETL artifacts
+  #   Value: !Ref ETLBucket
+  #   Export:
+  #     Name: !Sub ${Environment}-etl-bucket-name
+
+  # SeedFunctionArn:
+  #   Description: Seed Lambda function ARN
+  #   Value: !GetAtt SeedFunction.Arn
+
+  # ExtractFunctionArn:
+  #   Description: Extract Lambda function ARN
+  #   Value: !GetAtt ExtractFunction.Arn
+
+  # TransformFunctionArn:
+  #   Description: Transform Lambda function ARN
+  #   Value: !GetAtt TransformFunction.Arn
+
+  # LoadFunctionArn:
+  #   Description: Load Lambda function ARN
+  #   Value: !GetAtt LoadFunction.Arn
+
+  # DailySalesFunctionArn:
+  #   Description: Daily Sales ETL Lambda function ARN
+  #   Value: !GetAtt DailySalesETLFunction.Arn

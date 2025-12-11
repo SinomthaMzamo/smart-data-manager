@@ -2,7 +2,8 @@ import pandas as pd
 from sqlalchemy import create_engine
 from sqlalchemy.exc import SQLAlchemyError
 import logging
-from .db import get_engine
+# from .db import get_engine
+from .rds_db import get_engine
 
 # ----------------------------
 # Logging Setup

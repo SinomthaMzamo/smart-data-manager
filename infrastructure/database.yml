@@ -1,0 +1,62 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "RDS PostgreSQL (Free Tier) for ETL Project"
+
+Parameters:
+  DBUsername:
+    Type: String
+    Default: etl_user
+  DBPassword:
+    Type: String
+    NoEcho: true
+  DBName:
+    Type: String
+    Default: etldb
+
+Resources:
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow PostgreSQL access from Lambda or external SGs
+      VpcId:
+        Fn::ImportValue: ETL-VPC-ID
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: 0.0.0.0/0  # safe because DB is password protected + dev use
+      Tags:
+        - Key: Name
+          Value: RDS-Postgres-SG
+
+  RDSInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      Engine: postgres
+      DBInstanceClass: db.t3.micro
+      AllocatedStorage: 20
+      DBName: !Ref DBName
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      PubliclyAccessible: true
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      DBSubnetGroupName:
+        Fn::ImportValue: ETL-DBSubnetGroup
+      BackupRetentionPeriod: 1
+      MultiAZ: false
+
+Outputs:
+  RDSAddress:
+    Value: !GetAtt RDSInstance.Endpoint.Address
+    Export:
+      Name: ETL-RDS-Endpoint
+
+  RDSPort:
+    Value: !GetAtt RDSInstance.Endpoint.Port
+    Export:
+      Name: ETL-RDS-Port
+
+  RDSSecurityGroupID:
+    Value: !Ref RDSSecurityGroup
+    Export:
+      Name: ETL-RDS-SG

@@ -10,3 +10,9 @@ venv/
 __pycache__/
 
 */.DS_Store
+
+
+lambda_build/*/
+lambda_build/.DS_Store
+
+*.zip

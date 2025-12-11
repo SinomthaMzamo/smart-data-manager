@@ -1,0 +1,43 @@
+2025-11-24 17:39:06,059 - INFO - Starting full transformation pipeline
+2025-11-24 17:39:06,059 - INFO - Cleaning Customers: 50 rows before cleaning
+2025-11-24 17:39:06,063 - WARNING - Dropping 10 customers with invalid emails
+2025-11-24 17:39:06,065 - INFO - 40 rows after cleaning Customers
+2025-11-24 17:39:06,077 - INFO - Customers preview:
+   customer_id first_name last_name  ...    phone                 created_at    full_name
+0          891      Amara      Zulu  ...  Unknown 2025-11-24 15:37:50.663333   Amara Zulu
+1          892        Neo    Naidoo  ...  Unknown 2025-11-24 15:37:50.663333   Neo Naidoo
+2          893        Neo     Smith  ...  Unknown 2025-11-24 15:37:50.663333    Neo Smith
+3          894       Jane    Jacobs  ...  Unknown 2025-11-24 15:37:50.663333  Jane Jacobs
+4          895      Thabo     Smith  ...  Unknown 2025-11-24 15:37:50.663333  Thabo Smith
+
+[5 rows x 7 columns]
+2025-11-24 17:39:06,077 - INFO - Cleaning Products: 18 rows before cleaning
+2025-11-24 17:39:06,082 - INFO - 18 rows after cleaning Products
+2025-11-24 17:39:06,094 - INFO - Products preview:
+   product_id          product_name  ... category                                   full_description
+0         301    Samsung Galaxy A54  ...   Mobile  Samsung Galaxy A54 — Mid-range Android smartph...
+1         302        iPhone 13 Mini  ...   Mobile  iPhone 13 Mini — Compact smartphone with A15 chip
+2         303  Xiaomi Redmi Note 12  ...   Mobile  Xiaomi Redmi Note 12 — Budget smartphone with ...
+3         304         Sony WH-CH520  ...    Audio      Sony WH-CH520 — Wireless Bluetooth headphones
+4         305              JBL Go 3  ...    Audio              JBL Go 3 — Portable Bluetooth speaker
+
+[5 rows x 8 columns]
+2025-11-24 17:39:06,095 - INFO - Cleaning Orders: 300 rows before cleaning
+2025-11-24 17:39:06,099 - INFO - 300 rows after cleaning Orders
+2025-11-24 17:39:06,107 - INFO - Orders preview:
+   order_id  customer_id                 order_date  total_amount     status
+0      3260          911 2025-11-09 17:37:50.983171      17265.27    Shipped
+1      3261          926 2025-11-20 17:37:50.983199      10872.63    Shipped
+2      3262          935 2025-11-17 17:37:50.983209      12388.00  Cancelled
+3      3263          916 2025-11-03 17:37:50.983216      34494.00  Cancelled
+4      3264          914 2025-10-29 17:37:50.983223      90693.00  Cancelled
+2025-11-24 17:39:06,107 - INFO - Cleaning OrderItems: 921 rows before cleaning
+2025-11-24 17:39:06,114 - INFO - 921 rows after cleaning OrderItems
+2025-11-24 17:39:06,122 - INFO - OrderItems preview:
+   order_item_id  order_id  product_id  quantity    price  line_total
+0           3631      3260         303         4  3242.82    12971.28
+1           3632      3260         316         1   299.00      299.00
+2           3633      3260         304         2   899.00     1798.00
+3           3634      3260         312         2   699.00     1398.00
+4           3635      3260         310         1   799.00      799.00
+2025-11-24 17:39:06,122 - INFO - Transformation pipeline completed

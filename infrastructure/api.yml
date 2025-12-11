@@ -1,0 +1,218 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "ETL Reporting API (Phase 3): monolithic Lambda + API Gateway + API Keys"
+
+Parameters:
+  LambdaS3Bucket:
+    Type: String
+  LambdaS3Key:
+    Type: String
+  RDSHost:
+    Type: String
+  RDSPort:
+    Type: String
+  RDSPassword:
+    Type: String
+    NoEcho: true
+  PowerAppsApiKey:
+    Type: String
+    NoEcho: true
+    Description: "API key for Power Apps (write key)"
+  PowerBiApiKey:
+    Type: String
+    NoEcho: true
+    Description: "API key for Power BI (read-only key)"
+
+Resources:
+
+  APIExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: ApiLambdaExecution
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                Resource: "*"
+
+  APILambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: api_handler.lambda_handler
+      Role: !GetAtt APIExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaS3Bucket
+        S3Key: !Ref LambdaS3Key
+      Environment:
+        Variables:
+          AWS_DB_HOST: !Ref RDSHost
+          AWS_DB_PORT: !Ref RDSPort
+          AWS_DB_USERNAME: etl_user
+          AWS_DB_PASSWORD: !Ref RDSPassword
+          AWS_DB_NAME: etldb
+          POWERAPPS_API_KEY: !Ref PowerAppsApiKey
+          POWERBI_API_KEY: !Ref PowerBiApiKey
+      VpcConfig:
+        SubnetIds:
+          - !ImportValue ETL-PrivateSubnet1
+          - !ImportValue ETL-PrivateSubnet2
+        SecurityGroupIds:
+          - !ImportValue ETL-RDS-SG
+      Timeout: 30
+      MemorySize: 512
+
+  RestAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: "ETLReportingAPI"
+
+  # Root ANY
+  RootMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      ResourceId: !GetAtt RestAPI.RootResourceId
+      RestApiId: !Ref RestAPI
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri:
+          Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${APILambda.Arn}/invocations
+
+  # Proxy resource
+  ProxyResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestAPI
+      ParentId: !GetAtt RestAPI.RootResourceId
+      PathPart: "{proxy+}"
+
+  ProxyMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestAPI
+      ResourceId: !Ref ProxyResource
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      ApiKeyRequired: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri:
+          Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${APILambda.Arn}/invocations
+
+  APIDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - RootMethod
+      - ProxyMethod
+    Properties:
+      RestApiId: !Ref RestAPI
+      StageName: prod
+
+  # Create API Gateway API Keys with known values from CFN parameters (NoEcho)
+  PowerAppsApiKeyResource:
+    Type: AWS::ApiGateway::ApiKey
+    Properties:
+      Name: PowerApps-Write-Key
+      Enabled: true
+      Value: !Ref PowerAppsApiKey
+      StageKeys:
+        - RestApiId: !Ref RestAPI
+          StageName: prod
+
+  PowerBiApiKeyResource:
+    Type: AWS::ApiGateway::ApiKey
+    Properties:
+      Name: PowerBI-Read-Key
+      Enabled: true
+      Value: !Ref PowerBiApiKey
+      StageKeys:
+        - RestApiId: !Ref RestAPI
+          StageName: prod
+
+  # Usage Plans
+  PowerAppsUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    Properties:
+      UsagePlanName: powerapps-usage-plan
+      Throttle:
+        BurstLimit: 50
+        RateLimit: 25
+      Quota:
+        Limit: 100000
+        Period: MONTH
+      ApiStages:
+        - ApiId: !Ref RestAPI
+          Stage: prod
+
+  PowerBiUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    Properties:
+      UsagePlanName: powerbi-usage-plan
+      Throttle:
+        BurstLimit: 20
+        RateLimit: 10
+      Quota:
+        Limit: 50000
+        Period: MONTH
+      ApiStages:
+        - ApiId: !Ref RestAPI
+          Stage: prod
+
+  # Bind keys to usage plans
+  PowerAppsUsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref PowerAppsApiKeyResource
+      KeyType: API_KEY
+      UsagePlanId: !Ref PowerAppsUsagePlan
+
+  PowerBiUsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref PowerBiApiKeyResource
+      KeyType: API_KEY
+      UsagePlanId: !Ref PowerBiUsagePlan
+
+  # Permission for API Gateway to invoke the lambda
+  LambdaInvokePermissionAPI:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref APILambda
+      Principal: apigateway.amazonaws.com
+      SourceArn:
+        Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestAPI}/*/*/*
+
+Outputs:
+  ApiUrl:
+    Description: "Base URL for ETL API"
+    Value:
+      Fn::Sub: https://${RestAPI}.execute-api.${AWS::Region}.amazonaws.com/prod
+  PowerAppsApiKeyOutput:
+    Description: "API key for Power Apps (use in x-api-key header)"
+    Value: !Ref PowerAppsApiKey
+  PowerBiApiKeyOutput:
+    Description: "API key for Power BI (use in x-api-key header)"
+    Value: !Ref PowerBiApiKey
