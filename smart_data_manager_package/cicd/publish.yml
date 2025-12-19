@@ -1,0 +1,58 @@
+# .github/workflows/publish.yml
+name: Package CI/CD - Test, Build, and Publish to PyPI
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'smart_data_manager/**' # Trigger only when package source changes
+
+jobs:
+  publish_package:
+    runs-on: ubuntu-latest
+    environment: Production
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Needed for versioning tools
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10' # Match your development environment
+
+      - name: Install Build and Test Tools
+        run: |
+          pip install build twine pytest setuptools_scm # setuptools_scm handles versioning
+
+      - name: Run Package Tests
+        run: |
+          pytest smart_data_manager/tests/ # Assuming your tests are here
+
+      - name: Build Package
+        # setuptools_scm automatically determines the version (e.g., 1.0.2)
+        run: python -m build
+
+      - name: Get Version Number (for next job trigger)
+        id: version
+        # Extract the version from the distribution filename (e.g., smart_data_manager-1.0.2.tar.gz)
+        run: |
+          VERSION=$(ls dist | grep smart-data-manager | head -n 1 | sed -E 's/.*-(.*)\.(tar\.gz|whl)/\1/')
+          echo "NEW_VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Published package version is $VERSION"
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          user: __token__
+          password: ${{ secrets.PYPI_API_TOKEN }} # Secret stored in GitHub repo settings
+
+      - name: Trigger Azure Function App Deployment
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.FUNCTION_APP_REPO_PAT }} # PAT token to trigger the other repo
+          repository: your-org/your-function-app-repo # CRITICAL: Replace with your Function App repo path
+          event-type: deploy-etl-function
+          client-payload: '{"new_version": "${{ steps.version.outputs.NEW_VERSION }}"}'

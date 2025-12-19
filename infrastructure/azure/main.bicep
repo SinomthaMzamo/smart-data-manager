@@ -1,69 +1,68 @@
-@description('Environment name')
-@allowed([
-  'dev'
-  'staging'
-  'prod'
-])
-param environment string = 'dev'
-
 @description('Location for all resources')
 param location string = resourceGroup().location
 
-@description('SQL Server administrator login')
-param sqlAdminLogin string = 'sdm-admin'
+@description('Function App name')
+param functionAppName string = 'func-etl-${uniqueString(resourceGroup().id)}'
 
-@description('SQL Server administrator password')
 @secure()
 param sqlAdminPassword string
 
-@description('Existing SQL Server name (without .database.windows.net suffix)')
+param sqlAdminLogin string = 'sdm-admin'
+
+@description('Existing SQL Server name (optional)')
 param existingSqlServerName string = ''
 
-@description('Existing SQL Database name (if using existing database)')
+@description('Existing SQL Database name (optional)')
 param existingDatabaseName string = ''
 
+// =====================
 // Variables
-var uniqueSuffix = uniqueString(resourceGroup().id)
-var functionAppName = 'func-etl-${environment}-${uniqueSuffix}'
-var storageAccountName = 'stetl${environment}${take(uniqueSuffix, 8)}'
-var appServicePlanName = 'asp-etl-${environment}'
-var applicationInsightsName = 'appi-etl-${environment}'
-var keyVaultName = 'kv-etl-${environment}-${take(uniqueSuffix, 8)}'
+// =====================
+var storageAccountName = toLower('${uniqueString(resourceGroup().id)}funcsa')
+var hostingPlanName = functionAppName
+var appInsightsName = functionAppName
+var keyVaultName = 'kv-etl-${take(uniqueString(resourceGroup().id), 8)}'
 
-// Use existing or create new based on parameters
-var sqlServerName = empty(existingSqlServerName) ? 'sql-etl-${environment}-${uniqueSuffix}' : existingSqlServerName
-var databaseName = empty(existingDatabaseName) ? 'sqldb-etl-${environment}' : existingDatabaseName
-// Use az.environment() function to get the correct SQL Server suffix for the cloud
-var sqlServerFqdn = empty(existingSqlServerName) ? '${sqlServerName}${az.environment().suffixes.sqlServerHostname}' : '${existingSqlServerName}${az.environment().suffixes.sqlServerHostname}'
+var sqlServerName = empty(existingSqlServerName)
+  ? 'sql-etl-${uniqueString(resourceGroup().id)}'
+  : existingSqlServerName
 
-// Storage Account for Function App
-resource storageAccount 'Microsoft.Storage/storageAccounts@2023-01-01' = {
+var databaseName = empty(existingDatabaseName)
+  ? 'sqldb-etl'
+  : existingDatabaseName
+
+var sqlServerFqdn = '${sqlServerName}${environment().suffixes.sqlServerHostname}'
+
+// =====================
+// Storage
+// =====================
+resource storage 'Microsoft.Storage/storageAccounts@2022-09-01' = {
   name: storageAccountName
   location: location
-  sku: {
-    name: 'Standard_LRS'
-  }
+  sku: { name: 'Standard_LRS' }
   kind: 'StorageV2'
-  properties: {
-    supportsHttpsTrafficOnly: true
-    minimumTlsVersion: 'TLS1_2'
-  }
 }
 
-// App Service Plan (Consumption Plan for cost efficiency)
-resource appServicePlan 'Microsoft.Web/serverfarms@2023-01-01' = {
-  name: appServicePlanName
+// =====================
+// App Service Plan (Linux)
+// =====================
+resource plan 'Microsoft.Web/serverfarms@2022-03-01' = {
+  name: hostingPlanName
   location: location
   sku: {
-    name: 'Y1'  // Consumption plan
-    tier: 'Dynamic'
+    tier: 'Standard'
+    name: 'S2'
   }
-  properties: {}
+  properties: {
+    reserved: true
+  }
 }
 
-// Application Insights for monitoring
-resource applicationInsights 'Microsoft.Insights/components@2020-02-02' = {
-  name: applicationInsightsName
+// =====================
+// Application Insights
+// =====================
+resource insights 'Microsoft.Insights/components@2020-02-02' = {
+  name: appInsightsName
   location: location
   kind: 'web'
   properties: {
@@ -71,26 +70,28 @@ resource applicationInsights 'Microsoft.Insights/components@2020-02-02' = {
   }
 }
 
-// Key Vault for secrets (always create new, enable purge protection)
+// =====================
+// Key Vault (RBAC)
+// =====================
 resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   name: keyVaultName
   location: location
   properties: {
+    tenantId: subscription().tenantId
+    enableRbacAuthorization: true
+    enableSoftDelete: true
+    softDeleteRetentionInDays: 7
+    enablePurgeProtection: true
     sku: {
       family: 'A'
       name: 'standard'
     }
-    tenantId: subscription().tenantId
-    enabledForDeployment: false
-    enabledForTemplateDeployment: true
-    enableRbacAuthorization: true
-    enableSoftDelete: true
-    softDeleteRetentionInDays: 7
-    enablePurgeProtection: true  // Irreversible, required for security
   }
 }
 
-// SQL Server (only create if not using existing)
+// =====================
+// SQL Server (optional creation)
+// =====================
 resource sqlServer 'Microsoft.Sql/servers@2023-05-01-preview' = if (empty(existingSqlServerName)) {
   name: sqlServerName
   location: location
@@ -101,8 +102,7 @@ resource sqlServer 'Microsoft.Sql/servers@2023-05-01-preview' = if (empty(existi
   }
 }
 
-// Firewall rule to allow Azure services
-resource sqlFirewallRule 'Microsoft.Sql/servers/firewallRules@2023-05-01-preview' = if (empty(existingSqlServerName)) {
+resource sqlFirewall 'Microsoft.Sql/servers/firewallRules@2023-05-01-preview' = if (empty(existingSqlServerName)) {
   parent: sqlServer
   name: 'AllowAzureServices'
   properties: {
@@ -111,23 +111,32 @@ resource sqlFirewallRule 'Microsoft.Sql/servers/firewallRules@2023-05-01-preview
   }
 }
 
-// SQL Database (only create if not using existing)
-resource sqlDatabase 'Microsoft.Sql/servers/databases@2023-05-01-preview' = if (empty(existingDatabaseName)) {
-  parent: sqlServer
+// Reference server whether created or existing
+resource sqlServerRef 'Microsoft.Sql/servers@2023-05-01-preview' existing = {
+  name: sqlServerName
+}
+
+// =====================
+// SQL Database
+// =====================
+resource sqlDb 'Microsoft.Sql/servers/databases@2023-05-01-preview' = if (empty(existingDatabaseName)) {
+  parent: sqlServerRef
   name: databaseName
   location: location
   sku: {
-    name: 'Basic'
-    tier: 'Basic'
+    name: 'S1'
+    tier: 'Standard'
   }
   properties: {
+    maxSizeBytes: 2147483648
     collation: 'SQL_Latin1_General_CP1_CI_AS'
-    maxSizeBytes: 2147483648  // 2GB
   }
 }
 
-// Store secrets in Key Vault
-resource dbServerSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+// =====================
+// Key Vault Secrets
+// =====================
+resource kvDbServer 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   parent: keyVault
   name: 'DB-SERVER'
   properties: {
@@ -135,7 +144,7 @@ resource dbServerSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   }
 }
 
-resource dbNameSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+resource kvDbName 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   parent: keyVault
   name: 'DB-NAME'
   properties: {
@@ -143,7 +152,7 @@ resource dbNameSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   }
 }
 
-resource dbUsernameSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+resource kvDbUser 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   parent: keyVault
   name: 'DB-USERNAME'
   properties: {
@@ -151,7 +160,7 @@ resource dbUsernameSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   }
 }
 
-resource dbPasswordSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+resource kvDbPassword 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   parent: keyVault
   name: 'DB-PASSWORD'
   properties: {
@@ -159,7 +168,7 @@ resource dbPasswordSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   }
 }
 
-resource dbDriverSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+resource kvDbDriver 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   parent: keyVault
   name: 'DB-DRIVER'
   properties: {
@@ -167,89 +176,63 @@ resource dbDriverSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   }
 }
 
-// Function App
-resource functionApp 'Microsoft.Web/sites@2023-01-01' = {
+// =====================
+// Function App (Linux / Python)
+// =====================
+resource functionApp 'Microsoft.Web/sites@2022-03-01' = {
   name: functionAppName
   location: location
-  kind: 'functionapp'
+  kind: 'functionapp,linux'
   identity: {
     type: 'SystemAssigned'
   }
   properties: {
-    serverFarmId: appServicePlan.id
+    serverFarmId: plan.id
     siteConfig: {
+      linuxFxVersion: 'Python|3.11'
+      alwaysOn: true
       appSettings: [
+        { name: 'FUNCTIONS_EXTENSION_VERSION', value: '~4' }
+        { name: 'FUNCTIONS_WORKER_RUNTIME', value: 'python' }
+        { name: 'WEBSITE_RUN_FROM_PACKAGE', value: '1' }
+
         {
           name: 'AzureWebJobsStorage'
-          value: 'DefaultEndpointsProtocol=https;AccountName=${storageAccount.name};EndpointSuffix=${az.environment().suffixes.storage};AccountKey=${storageAccount.listKeys().keys[0].value}'
+          value: 'DefaultEndpointsProtocol=https;AccountName=${storageAccountName};AccountKey=${storage.listKeys().keys[0].value}'
         }
-        {
-          name: 'WEBSITE_CONTENTAZUREFILECONNECTIONSTRING'
-          value: 'DefaultEndpointsProtocol=https;AccountName=${storageAccount.name};EndpointSuffix=${az.environment().suffixes.storage};AccountKey=${storageAccount.listKeys().keys[0].value}'
-        }
-        {
-          name: 'WEBSITE_CONTENTSHARE'
-          value: toLower(functionAppName)
-        }
-        {
-          name: 'FUNCTIONS_EXTENSION_VERSION'
-          value: '~4'
-        }
-        {
-          name: 'FUNCTIONS_WORKER_RUNTIME'
-          value: 'python'
-        }
-        {
-          name: 'APPINSIGHTS_INSTRUMENTATIONKEY'
-          value: applicationInsights.properties.InstrumentationKey
-        }
-        {
-          name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
-          value: applicationInsights.properties.ConnectionString
-        }
-        {
-          name: 'DB_SERVER'
-          value: '@Microsoft.KeyVault(SecretUri=${dbServerSecret.properties.secretUri})'
-        }
-        {
-          name: 'DB_NAME'
-          value: '@Microsoft.KeyVault(SecretUri=${dbNameSecret.properties.secretUri})'
-        }
-        {
-          name: 'DB_USERNAME'
-          value: '@Microsoft.KeyVault(SecretUri=${dbUsernameSecret.properties.secretUri})'
-        }
-        {
-          name: 'DB_PASSWORD'
-          value: '@Microsoft.KeyVault(SecretUri=${dbPasswordSecret.properties.secretUri})'
-        }
-        {
-          name: 'DB_DRIVER'
-          value: '@Microsoft.KeyVault(SecretUri=${dbDriverSecret.properties.secretUri})'
-        }
+
+        { name: 'APPINSIGHTS_INSTRUMENTATIONKEY', value: insights.properties.InstrumentationKey }
+
+        // Key Vault references
+        { name: 'DB_SERVER', value: '@Microsoft.KeyVault(SecretUri=${kvDbServer.properties.secretUri})' }
+        { name: 'DB_NAME', value: '@Microsoft.KeyVault(SecretUri=${kvDbName.properties.secretUri})' }
+        { name: 'DB_USERNAME', value: '@Microsoft.KeyVault(SecretUri=${kvDbUser.properties.secretUri})' }
+        { name: 'DB_PASSWORD', value: '@Microsoft.KeyVault(SecretUri=${kvDbPassword.properties.secretUri})' }
+        { name: 'DB_DRIVER', value: '@Microsoft.KeyVault(SecretUri=${kvDbDriver.properties.secretUri})' }
       ]
-      pythonVersion: '3.12'
     }
-    httpsOnly: true
   }
 }
 
-// Grant Function App access to Key Vault using RBAC
-resource keyVaultRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(keyVault.id, functionApp.id, 'Key Vault Secrets User')
+// =====================
+// Grant Function access to Key Vault
+// =====================
+resource kvRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(keyVault.id, functionApp.id, 'kv-secrets-user')
   scope: keyVault
   properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6') // Key Vault Secrets User
+    roleDefinitionId: subscriptionResourceId(
+      'Microsoft.Authorization/roleDefinitions',
+      '4633458b-17de-408a-b874-0445c86b69e6'
+    )
     principalId: functionApp.identity.principalId
-    principalType: 'ServicePrincipal'
   }
 }
 
+// =====================
 // Outputs
+// =====================
 output functionAppName string = functionApp.name
 output sqlServerFqdn string = sqlServerFqdn
 output databaseName string = databaseName
-output storageAccountName string = storageAccount.name
-output applicationInsightsName string = applicationInsights.name
 output keyVaultName string = keyVault.name
-output functionAppPrincipalId string = functionApp.identity.principalId

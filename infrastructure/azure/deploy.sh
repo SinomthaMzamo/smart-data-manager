@@ -1,282 +1,201 @@
 #!/bin/bash
-# Updated Azure ETL Deployment Script with ODBC Driver Support
-# Place this in: infrastructure/azure/deploy.sh
-
-set -e  # Exit on error
+set -euo pipefail
 
 # ============================================
-# CONFIGURATION
+# CONFIG
 # ============================================
-RESOURCE_GROUP="rg-smart-data-manager"
+RESOURCE_GROUP="rg-smart-data-manager-ready"
 LOCATION="southafricanorth"
-ENVIRONMENT="dev"
 
-# Existing SQL Server details (WITHOUT the .database.windows.net suffix)
-EXISTING_SQL_SERVER="smart-data-manager"
-EXISTING_DATABASE="sdm_db"
+TEMPLATE_FILE="main.bicep"
+DEPLOY_DIR=".azure_deploy"
+ZIP_NAME="function_app.zip"
+
 SQL_ADMIN_LOGIN="sdm-admin"
 
+# Increase Azure CLI timeout for slow Kudu responses
+export AZURE_HTTP_USER_AGENT_MODE=STRICT
+export AZURE_CLI_HTTP_RETRY=5
+export AZURE_BARE_HTTP_TIMEOUT=600
+
 # ============================================
-# COLOR OUTPUT
+# HELPERS
 # ============================================
-RED='\033[0;31m'
 GREEN='\033[0;32m'
+RED='\033[0;31m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-print_success() { echo -e "${GREEN}✅ $1${NC}"; }
-print_error() { echo -e "${RED}❌ $1${NC}"; }
-print_info() { echo -e "${YELLOW}ℹ️  $1${NC}"; }
-print_section() { echo -e "\n${GREEN}========================================${NC}"; echo -e "${GREEN}$1${NC}"; echo -e "${GREEN}========================================${NC}\n"; }
+log()    { echo -e "${GREEN}▶ $1${NC}"; }
+warn()   { echo -e "${YELLOW}⚠ $1${NC}"; }
+error()  { echo -e "${RED}❌ $1${NC}"; }
 
-# ============================================
-# ERROR HANDLING
-# ============================================
 cleanup() {
-    if [ -d "$DEPLOY_DIR" ]; then
-        rm -rf "$DEPLOY_DIR"
-    fi
-    if [ -f "function_app.zip" ]; then
-        rm function_app.zip
-    fi
+  rm -rf "$DEPLOY_DIR" "$ZIP_NAME"
 }
 trap cleanup EXIT
-trap 'print_error "Deployment failed at line $LINENO"' ERR
 
 # ============================================
-# PREFLIGHT CHECKS
+# PREFLIGHT
 # ============================================
-print_section "Preflight Checks"
+log "Checking Azure CLI login"
+az account show >/dev/null 2>&1 || az login
 
-if ! command -v az &> /dev/null; then
-    print_error "Azure CLI not found"
-    exit 1
-fi
-print_success "Azure CLI found"
-
-echo "🔐 Checking Azure login status..."
-if ! az account show > /dev/null 2>&1; then
-    print_info "Not logged in. Please login..."
-    az login
-fi
-
-SUBSCRIPTION=$(az account show --query name -o tsv)
-print_success "Logged in to subscription: $SUBSCRIPTION"
-
-if ! command -v jq &> /dev/null; then
-    print_error "jq is required but not installed"
-    exit 1
-fi
-print_success "jq found"
-
-if [ ! -d "../../azure_functions" ]; then
-    print_error "azure_functions directory not found"
-    exit 1
-fi
-print_success "azure_functions directory found"
+log "Checking jq"
+command -v jq >/dev/null || { error "jq is required"; exit 1; }
 
 # ============================================
-# GET SQL PASSWORD
+# SQL PASSWORD
 # ============================================
-print_section "Database Configuration"
-print_info "Using existing SQL Server: ${EXISTING_SQL_SERVER}.database.windows.net"
-echo "📝 Enter SQL Server admin password:"
+echo "🔐 Enter SQL admin password:"
 read -s SQL_ADMIN_PASSWORD
-export SQL_ADMIN_PASSWORD
 echo ""
+export SQL_ADMIN_PASSWORD
 
 # ============================================
-# CREATE RESOURCE GROUP
+# RESOURCE GROUP
 # ============================================
-print_section "Creating Resource Group"
-az group create \
-    --name $RESOURCE_GROUP \
-    --location $LOCATION \
-    --output table
-print_success "Resource group ready"
+if ! az group exists --name "$RESOURCE_GROUP" | grep -q true; then
+  log "Creating resource group"
+  az group create \
+    --name "$RESOURCE_GROUP" \
+    --location "$LOCATION" \
+    --output none
+else
+  warn "Resource group already exists"
+fi
 
 # ============================================
 # DEPLOY INFRASTRUCTURE
 # ============================================
-print_section "Deploying Infrastructure"
-print_info "This may take 3-5 minutes..."
+log "Deploying infrastructure (Bicep)"
 
-DEPLOYMENT_OUTPUT=$(az deployment group create \
-    --resource-group $RESOURCE_GROUP \
-    --template-file main.bicep \
-    --parameters \
-        environment=$ENVIRONMENT \
-        location=$LOCATION \
-        sqlAdminLogin=$SQL_ADMIN_LOGIN \
-        sqlAdminPassword="$SQL_ADMIN_PASSWORD" \
-        existingSqlServerName="$EXISTING_SQL_SERVER" \
-        existingDatabaseName="$EXISTING_DATABASE" \
-    --query 'properties.outputs' \
-    --output json)
+DEPLOY_OUTPUT=$(az deployment group create \
+  --resource-group "$RESOURCE_GROUP" \
+  --template-file "$TEMPLATE_FILE" \
+  --parameters \
+    location="$LOCATION" \
+    sqlAdminLogin="$SQL_ADMIN_LOGIN" \
+    sqlAdminPassword="$SQL_ADMIN_PASSWORD" \
+  --query properties.outputs \
+  -o json)
 
-FUNCTION_APP_NAME=$(echo $DEPLOYMENT_OUTPUT | jq -r '.functionAppName.value')
-SQL_SERVER_FQDN=$(echo $DEPLOYMENT_OUTPUT | jq -r '.sqlServerFqdn.value')
-DATABASE_NAME=$(echo $DEPLOYMENT_OUTPUT | jq -r '.databaseName.value')
-STORAGE_ACCOUNT=$(echo $DEPLOYMENT_OUTPUT | jq -r '.storageAccountName.value')
+FUNCTION_APP_NAME=$(echo "$DEPLOY_OUTPUT" | jq -r '.functionAppName.value')
+KEY_VAULT_NAME=$(echo "$DEPLOY_OUTPUT" | jq -r '.keyVaultName.value')
 
-if [ -z "$FUNCTION_APP_NAME" ] || [ "$FUNCTION_APP_NAME" == "null" ]; then
-    print_error "Deployment failed - no function app name returned"
-    exit 1
+if [[ -z "$FUNCTION_APP_NAME" || "$FUNCTION_APP_NAME" == "null" ]]; then
+  error "Function App name not returned"
+  exit 1
 fi
 
-print_success "Infrastructure deployed!"
-echo ""
-echo "📊 Deployment Details:"
-echo "  Resource Group: $RESOURCE_GROUP"
-echo "  Function App: $FUNCTION_APP_NAME"
-echo "  SQL Server: $SQL_SERVER_FQDN"
-echo "  Database: $DATABASE_NAME"
-echo "  Storage Account: $STORAGE_ACCOUNT"
-echo ""
+log "Function App: $FUNCTION_APP_NAME"
+log "Key Vault: $KEY_VAULT_NAME"
 
 # ============================================
-# PREPARE FUNCTION CODE
+# WAIT FOR RBAC PROPAGATION
 # ============================================
-print_section "Preparing Function Code"
+log "Waiting for Key Vault RBAC propagation (90s)"
+sleep 90
 
-cd ../../
+# ============================================
+# PREPARE FUNCTION PACKAGE
+# ============================================
+log "Preparing deployment package"
 
-DEPLOY_DIR=".azure_deploy"
-rm -rf $DEPLOY_DIR
-mkdir -p $DEPLOY_DIR
+rm -rf "$DEPLOY_DIR"
+mkdir "$DEPLOY_DIR"
 
-print_info "Copying Azure Functions..."
-cp -r azure_functions/* $DEPLOY_DIR/
+# Copy Function App structure
+cp -r ../../azure_functions/* "$DEPLOY_DIR/"
 
-print_info "Copying smart_data_manager_package..."
-if [ ! -d "smart_data_manager_package" ]; then
-    print_error "smart_data_manager_package directory not found"
-    exit 1
-fi
-cp -r smart_data_manager_package $DEPLOY_DIR/
+# 1. Define your Artifacts details
+# It is better to set these as Environment Variables in your terminal 
+# before running the script: export ARTIFACTS_PAT="your_token_here"
+ORG_NAME="sinomthamzamo"
+FEED_NAME="smart-data-feed"
+PROJECT_NAME="smart-data-manager"
+# The PAT you generated earlier
+PAT="${ARTIFACTS_PAT}"
+# 2. Construct the Authenticated URL
+# Format: https://<ANY_USER>:<PAT>@pkgs.dev.azure.com/<ORG>/_packaging/<FEED>/pypi/simple/
+FEED_URL="https://az:${PAT}@pkgs.dev.azure.com/${ORG_NAME}/${PROJECT_NAME}/_packaging/${FEED_NAME}/pypi/simple/"
 
-# Create requirements.txt
-cat > $DEPLOY_DIR/requirements.txt << 'EOF'
-pandas==2.2.2
-SQLAlchemy==2.0.30
-pyodbc>=5.1.0
+log "Generating requirements.txt using private Artifacts feed..."
+
+cat > "$DEPLOY_DIR/requirements.txt" <<EOF
+--index-url $FEED_URL
+
 azure-functions
 python-dotenv==1.0.1
+smart-data-manager==1.0.19
 EOF
 
-# Create .funcignore
-cat > $DEPLOY_DIR/.funcignore << 'EOF'
+# .funcignore
+cat > "$DEPLOY_DIR/.funcignore" <<EOF
 .git*
 .vscode
 __pycache__
 *.pyc
 .env
-local.settings.json
-.venv
-venv
-*.md
 tests/
 *.log
+smart_data_manager_package/
 EOF
 
-print_success "Function package prepared"
+log "Packaging zip"
+(
+  cd "$DEPLOY_DIR"
+  zip -r "../$ZIP_NAME" . >/dev/null
+)
+
+ZIP_SIZE=$(du -h "$ZIP_NAME" | cut -f1)
+log "Zip package created ($ZIP_SIZE)"
 
 # ============================================
 # DEPLOY FUNCTION CODE
 # ============================================
-print_section "Deploying Function Code"
+log "Deploying Function App code (zip deploy)"
 
-cd $DEPLOY_DIR
-zip -r ../function_app.zip . -q
-cd ..
-
-print_success "Package created ($(du -h function_app.zip | cut -f1))"
-
-print_info "Uploading to Azure (2-3 minutes)..."
 az functionapp deployment source config-zip \
-    --resource-group $RESOURCE_GROUP \
-    --name $FUNCTION_APP_NAME \
-    --src function_app.zip \
-    --build-remote true \
-    --timeout 900
+  --resource-group "$RESOURCE_GROUP" \
+  --name "$FUNCTION_APP_NAME" \
+  --src "$ZIP_NAME" \
+  --timeout 600 \
+  --output none \
+  --build-remote true
 
-print_success "Function code deployed"
-
-# ============================================
-# CONFIGURE STARTUP SCRIPT FOR ODBC
-# ============================================
-print_section "Configuring ODBC Drivers"
-
-print_info "Setting startup command to install ODBC drivers..."
-az functionapp config set \
-    --resource-group $RESOURCE_GROUP \
-    --name $FUNCTION_APP_NAME \
-    --startup-file startup.sh \
-    --output none
-
-print_success "Startup script configured"
-
-print_info "Restarting function app..."
-az functionapp restart \
-    --resource-group $RESOURCE_GROUP \
-    --name $FUNCTION_APP_NAME \
-    --output none
-
-print_success "Function app restarted"
-
-print_info "Waiting 60 seconds for startup script to complete..."
-sleep 60
+log "Waiting for function startup"
+sleep 30
 
 # ============================================
-# VERIFY DEPLOYMENT
+# VERIFY
 # ============================================
-print_section "Verifying Deployment"
+log "Verifying deployment"
 
-print_info "Checking Function App status..."
 APP_STATE=$(az functionapp show \
-    --name $FUNCTION_APP_NAME \
-    --resource-group $RESOURCE_GROUP \
-    --query state -o tsv)
-print_success "Function App state: $APP_STATE"
+  --resource-group "$RESOURCE_GROUP" \
+  --name "$FUNCTION_APP_NAME" \
+  --query state -o tsv)
 
-print_info "Listing deployed functions..."
+log "Function App state: $APP_STATE"
+
+log "Listing deployed functions"
 FUNCTIONS=$(az functionapp function list \
-    --name $FUNCTION_APP_NAME \
-    --resource-group $RESOURCE_GROUP \
-    --query "[].name" -o tsv)
+  --resource-group "$RESOURCE_GROUP" \
+  --name "$FUNCTION_APP_NAME" \
+  --query "[].name" -o tsv || true)
 
-if [ ! -z "$FUNCTIONS" ]; then
-    print_success "Functions deployed: $FUNCTIONS"
+if [[ -z "$FUNCTIONS" ]]; then
+  warn "No functions listed yet (may still be indexing)"
 else
-    print_error "No functions found - deployment may have failed"
+  log "Functions:"
+  echo "$FUNCTIONS"
 fi
 
 # ============================================
-# COMPLETION
+# DONE
 # ============================================
-print_section "Deployment Complete!"
-
 echo ""
-echo "🎯 Your ETL is now running on Azure!"
-echo ""
-echo "⏰ Schedule: Runs daily at 4:00 AM UTC"
-echo ""
-echo "📝 Next Steps:"
-echo ""
-echo "1. Wait 2-3 minutes for ODBC drivers to install, then test:"
-echo "   FUNCTION_KEY=\$(az functionapp function keys list \\"
-echo "     --resource-group $RESOURCE_GROUP \\"
-echo "     --name $FUNCTION_APP_NAME \\"
-echo "     --function-name etl_function \\"
-echo "     --query default -o tsv)"
-echo ""
-echo "   curl -X POST \"https://${FUNCTION_APP_NAME}.azurewebsites.net/api/etl_function?code=\$FUNCTION_KEY\""
-echo ""
-echo "2. Monitor logs:"
-echo "   az webapp log tail --name $FUNCTION_APP_NAME --resource-group $RESOURCE_GROUP"
-echo ""
-echo "3. View in Azure Portal:"
-echo "   https://portal.azure.com/#resource/subscriptions/$(az account show --query id -o tsv)/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Web/sites/$FUNCTION_APP_NAME"
-echo ""
-echo "💡 To update code, just run this script again!"
-echo ""
+log "Deployment complete 🎉"
+echo "Portal:"
+echo "https://portal.azure.com/#resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Web/sites/$FUNCTION_APP_NAME"

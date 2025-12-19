@@ -1,4 +1,5 @@
 import logging
+import sys
 from .extract import extract_table
 from .transform import transform_all
 from .load import load_transformed_schema
@@ -6,21 +7,21 @@ from .load import load_transformed_schema
 # ----------------------------
 # Logging Setup
 # ----------------------------
+# We use a standard logger that outputs to the console (stdout).
+# Azure Functions captures this stream and redirects it to Application Insights.
 logger = logging.getLogger("run_etl")
 logger.setLevel(logging.DEBUG)
 
-ch = logging.StreamHandler()
+# Console handler
+ch = logging.StreamHandler(sys.stdout)
 ch.setLevel(logging.INFO)
 
-fh = logging.FileHandler("run_etl.log", mode="w")
-fh.setLevel(logging.DEBUG)
-
+# Formatter
 formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 ch.setFormatter(formatter)
-fh.setFormatter(formatter)
 
+# NOTE: We removed fh = logging.FileHandler(...) to avoid OSError on Azure.
 logger.addHandler(ch)
-logger.addHandler(fh)
 
 # ----------------------------
 # ETL Pipeline
@@ -34,6 +35,11 @@ def run_etl():
     products_df = extract_table("Products")
     orders_df = extract_table("Orders")
     order_items_df = extract_table("OrderItems")
+    
+    if customers_df.empty or products_df.empty:
+        logger.error("Critical tables are empty. Aborting ETL.")
+        return
+        
     logger.info("Extraction Phase Completed")
 
     # ---------- Transformation ----------
@@ -43,15 +49,20 @@ def run_etl():
 
     # ---------- Loading ----------
     logger.info("Starting Load Phase")
-    load_transformed_schema(
-        dim_customers=transformed_data["dim_customers"],
-        dim_products=transformed_data["dim_products"],
-        dim_date=transformed_data["dim_date"],
-        fact_orders=transformed_data["fact_orders"],
-        fact_order_items=transformed_data["fact_order_items"],
-        mode="replace"  # can switch to "append" if incremental load
-    )
-    logger.info("Load Phase Completed")
+    try:
+        load_transformed_schema(
+            dim_customers=transformed_data["dim_customers"],
+            dim_products=transformed_data["dim_products"],
+            dim_date=transformed_data["dim_date"],
+            fact_orders=transformed_data["fact_orders"],
+            fact_order_items=transformed_data["fact_order_items"],
+            mode="replace"
+        )
+        logger.info("Load Phase Completed")
+    except Exception as e:
+        logger.error(f"Failed to load data: {e}")
+        raise
+
     logger.info("=== ETL Pipeline Finished Successfully ===")
 
 # ----------------------------

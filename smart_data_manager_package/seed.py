@@ -1,321 +1,229 @@
+import os
 import random
 import datetime
+import logging
 import pandas as pd
 from sqlalchemy import text
-# from .db import get_engine                # for mssql
-from .rds_db import get_engine              # for pgsql
+from .db import get_engine
 
+# Configure logging to ensure it shows up in CloudWatch/Azure logs
+logging.basicConfig(level=logging.INFO)
 
 # -----------------------------
 # CONFIG
 # -----------------------------
 NUM_CUSTOMERS = 50
 NUM_PRODUCTS = 30
-NUM_ORDERS = 200
-CORRUPTION_RATE = 0.15  # 15% corrupted rows
+NUM_ORDERS = 1000
+CORRUPTION_RATE = 0.15
 
-start_date = datetime.datetime.today() - datetime.timedelta(days=365)
+start_date = datetime.datetime.today() - datetime.timedelta(days=730)
 end_date = datetime.datetime.today()
 
 fake_first_names = ["John", "Jane", "Mary", "Neo", "Sizwe", "Lerato", "Amara", "Thabo", "Kyla", "Musa"]
 fake_last_names = ["Smith", "Dlamini", "Zulu", "Nkosi", "Peters", "Naidoo", "Khumalo", "Jacobs", "Ngwenya"]
 
-# -----------------------------
-# PRODUCT CATALOG (with categories)
-# -----------------------------
 PRODUCT_CATALOG = [
-    ("Samsung Galaxy A54", "Mid-range Android smartphone with AMOLED display", 4999.00, "Mobile"),
+    ("Samsung Galaxy A54", "Mid-range Android smartphone", 4999.00, "Mobile"),
     ("iPhone 13 Mini", "Compact smartphone with A15 chip", 10999.00, "Mobile"),
-    ("Xiaomi Redmi Note 12", "Budget smartphone with 50MP camera", 3299.00, "Mobile"),
+    ("Xiaomi Redmi Note 12", "Budget smartphone", 3299.00, "Mobile"),
     ("Sony WH-CH520", "Wireless Bluetooth headphones", 899.00, "Audio"),
     ("JBL Go 3", "Portable Bluetooth speaker", 699.00, "Audio"),
     ("Anker PowerCore 20k", "High-capacity power bank", 599.00, "Accessories"),
-    ("Type-C Fast Charger", "25W USB-C fast-charging adapter", 249.00, "Accessories"),
-    ("HP 24-inch Monitor", "1080p LED monitor with thin bezel", 1899.00, "Computing"),
-    ("Logitech K380 Keyboard", "Compact Bluetooth multi-device keyboard", 749.00, "Computing"),
-    ("Logitech M720 Mouse", "Ergonomic multi-device wireless mouse", 799.00, "Computing"),
-    ("Seagate 1TB External HDD", "Portable USB 3.0 hard drive", 899.00, "Computing"),
-    ("TP-Link WiFi Router", "Dual-band router for home use", 699.00, "Networking"),
-    ("Google Chromecast", "Streaming device for TVs", 799.00, "Networking"),
-    ("Philips Airfryer XL", "Digital air fryer with rapid hot air tech", 2499.00, "Appliances"),
-    ("Russell Hobbs Kettle", "Stainless steel electric kettle", 399.00, "Appliances"),
-    ("Defy Toaster", "2-slice electric toaster", 299.00, "Appliances"),
-    ("SNUG Iron 2000W", "Steam iron with ceramic plate", 499.00, "Appliances"),
-    ("NutriBullet Blender", "High-speed blender for smoothies", 1899.00, "Appliances"),
+    ("Type-C Fast Charger", "25W adapter", 249.00, "Accessories"),
+    ("HP 24-inch Monitor", "1080p LED monitor", 1899.00, "Computing"),
+    ("Logitech K380 Keyboard", "Bluetooth keyboard", 749.00, "Computing"),
+    ("Logitech M720 Mouse", "Wireless mouse", 799.00, "Computing"),
+    ("Seagate 1TB External HDD", "USB 3.0 drive", 899.00, "Computing"),
+    ("TP-Link WiFi Router", "Dual-band router", 699.00, "Networking"),
+    ("Google Chromecast", "Streaming device", 799.00, "Networking"),
+    ("Philips Airfryer XL", "Digital air fryer", 2499.00, "Appliances"),
+    ("Russell Hobbs Kettle", "Electric kettle", 399.00, "Appliances"),
+    ("Defy Toaster", "2-slice toaster", 299.00, "Appliances"),
+    ("SNUG Iron 2000W", "Steam iron", 499.00, "Appliances"),
+    ("NutriBullet Blender", "High-speed blender", 1899.00, "Appliances"),
 ]
 
 # -----------------------------
-# UTILS
+# LOGGING UTILITIES
 # -----------------------------
-def random_date():
-    delta = end_date - start_date
-    return start_date + datetime.timedelta(seconds=random.randint(0, int(delta.total_seconds())))
-
-def generate_email(first, last):
-    # 80% good, 20% corrupted
-    if random.random() < 0.2:  
-        bad_values = ["not-an-email", "bad-email", "invalid", "fake"]
-        base = random.choice(bad_values)
-        suffix = random.randint(1000, 999999)
-        return f"{base}-{suffix}"   # ensures uniqueness
-    
-    # good email
-    unique = random.randint(1, 999999)
-    return f"{first.lower()}.{last.lower()}{unique}@example.com"
-
-# -------------------------
-# Helper: Corrupt price safely
-# -------------------------
-def corrupt_price(price):
+def log_db_state(engine, label="CURRENT DATABASE STATE"):
+    """Queries SQL Server metadata to report all tables and their current row counts."""
+    query = """
+    SELECT 
+        t.name AS TableName, 
+        p.rows AS [RowCount] 
+    FROM sys.tables t
+    INNER JOIN sys.partitions p ON t.object_id = p.object_id
+    WHERE p.index_id IN (0,1)
+    ORDER BY t.name;
     """
-    Returns a corrupted but SQL-safe price.
-    Corruption outcomes:
-    - 10%: negative price
-    - 10%: extreme price
-    - 10%: zero price
-    - Otherwise: original price
-    """
-    r = random.random()
-
-    if r < 0.10:
-        return -abs(price)  # negative value corruption
-
-    elif r < 0.20:
-        return price * random.randint(50, 200)  # extreme outlier corruption
-
-    elif r < 0.30:
-        return 0  # zero price corruption
-
-    else:
-        return price  # valid price
-
-def get_existing_customer_ids(engine):
-    query = "SELECT customer_id FROM Customers"
-    return pd.read_sql(query, engine)["customer_id"].tolist()
-
+    logging.info(f"--- {label} ---")
+    try:
+        with engine.connect() as conn:
+            df = pd.read_sql(text(query), conn)
+            if df.empty:
+                logging.info("  (Database is currently empty)")
+            else:
+                for _, row in df.iterrows():
+                    logging.info(f"  - {row['TableName']}: {row['RowCount']} rows")
+    except Exception as e:
+        logging.warning(f"Could not fetch DB state: {e}")
+    logging.info("-" * (len(label) + 8))
 
 # -----------------------------
-# CLEAR TABLES (dev only)
+# SCHEMA & CLEANUP
 # -----------------------------
-def clear_tables(engine):
+def drop_tables(engine):
+    tables = [
+        "FactOrderItems", "FactOrders", "OrderItems", "Orders", 
+        "Products", "Customers", "DimProducts", "DimCustomers", 
+        "DimDate", "DailySalesSummary"
+    ]
     with engine.begin() as conn:
-        conn.execute(text("DELETE FROM OrderItems"))
-        conn.execute(text("DELETE FROM Orders"))
-        conn.execute(text("DELETE FROM Products"))
-        conn.execute(text("DELETE FROM Customers"))
-        conn.execute(text("DELETE FROM DailySalesSummary")) 
-        conn.execute(text("DELETE FROM CustomerSegments"))
-        conn.execute(text("DELETE FROM ProductPerformance"))  
-        conn.execute(text("DELETE FROM DimDate"))
-        conn.execute(text("DELETE FROM DimCustomers"))  
-        conn.execute(text("DELETE FROM DimProducts"))
-        conn.execute(text("DELETE FROM FactOrderItems"))  
-        conn.execute(text("DELETE FROM FactOrders")) 
-    print("🧹 Tables cleared")
+        for table in tables:
+            try:
+                conn.execute(text(f"DROP TABLE IF EXISTS {table}"))
+                logging.info(f"🗑️ Dropped {table}")
+            except Exception as e:
+                logging.warning(f"Could not drop {table}: {e}")
+
+def execute_schema(engine):
+    schema_path = os.path.join(os.path.dirname(__file__), "schema.sql")
+    if not os.path.exists(schema_path):
+        logging.error(f"⚠️ schema.sql not found at {schema_path}!")
+        return
+
+    with open(schema_path, "r") as f:
+        statements = f.read().split("GO")
+        
+    with engine.begin() as conn:
+        for statement in statements:
+            clean_stmt = statement.strip()
+            if clean_stmt:
+                conn.execute(text(clean_stmt))
+    logging.info("🏗️ Schema created successfully")
 
 # -----------------------------
-# SEED CUSTOMERS
+# SEEDING FUNCTIONS
 # -----------------------------
 def seed_customers(engine):
     customers = []
     emails_seen = set()
-
     for _ in range(NUM_CUSTOMERS):
-        fname = random.choice(fake_first_names)
-        lname = random.choice(fake_last_names)
-
-        # Generate unique email (handles clean + corrupted automatically)
-        email = generate_email(fname, lname)
-
-        # Guarantee uniqueness no matter what
-        while email in emails_seen:
-            email = generate_email(fname, lname)
-
-        emails_seen.add(email)
-
-        customers.append({
-            "first_name": fname,
-            "last_name": lname,
-            "email": email
-        })
+        fname, lname = random.choice(fake_first_names), random.choice(fake_last_names)
+        email = f"{fname.lower()}.{lname.lower()}{random.randint(1,9999)}@test.com"
+        if email not in emails_seen:
+            emails_seen.add(email)
+            customers.append({"first_name": fname, "last_name": lname, "email": email})
 
     df = pd.DataFrame(customers)
-
-    # Final safety net (should not do anything, but protects DB insert)
-    df = df.drop_duplicates(subset=["email"])
-
     df.to_sql("Customers", engine, if_exists="append", index=False)
-    print("👥 Customers seeded:", len(df))
-    return df
+    logging.info(f"👥 Inserted {len(df)} customers")
 
-# -----------------------------
-# SEED PRODUCTS
-# -----------------------------
 def seed_products(engine):
     products = []
-
-    for name, desc, base_price, category in PRODUCT_CATALOG:
-
-        price = base_price
-
-        # Corrupt ~20% of the time
-        if random.random() < CORRUPTION_RATE:
-            price = corrupt_price(base_price)
-
-        stock_quantity = random.randint(0, 200)
-
+    for name, desc, price, cat in PRODUCT_CATALOG:
         products.append({
-            "product_name": name,
-            "description": desc,
-            "price": price,
-            "stock_quantity": stock_quantity,
-            "category": category
+            "product_name": name, "description": desc,
+            "price": price, "stock_quantity": random.randint(10, 100),
+            "category": cat
         })
-
-    # Convert to DataFrame
     df = pd.DataFrame(products)
-
-    # Ensure all prices are numeric so SQL Server doesn't explode
-    df["price"] = pd.to_numeric(df["price"], errors="coerce").fillna(0)
-
-    # Print preview of corrupted rows (for debugging)
-    corrupted_preview = df[df["price"] <= 0].head()
-    if not corrupted_preview.empty:
-        print("⚠️ Corrupted price examples:")
-        print(corrupted_preview)
-
-    # Insert safely
     df.to_sql("Products", engine, if_exists="append", index=False)
+    logging.info(f"📦 Inserted {len(df)} products")
 
-    print("📦 Products seeded:", len(df))
-    return df
+def get_random_date(start, end):
+    """Generates a random datetime between two datetime objects."""
+    delta = end - start
+    int_delta = (delta.days * 24 * 60 * 60) + delta.seconds
+    random_second = random.randrange(int_delta)
+    return start + datetime.timedelta(seconds=random_second)
 
-# -----------------------------
-# SEED ORDERS + ORDER ITEMS
-# -----------------------------
-def seed_orders_and_items(engine, NUM_ORDERS=300):
-    customers_df = pd.read_sql("SELECT customer_id FROM Customers;", engine)
-    products_df = pd.read_sql("SELECT product_id, price FROM Products;", engine)
+def seed_orders_and_items(engine):
+    cust_df = pd.read_sql("SELECT customer_id FROM Customers", engine)
+    prod_df = pd.read_sql("SELECT product_id, price FROM Products", engine)
+    
+    cust_ids = cust_df["customer_id"].tolist()
+    prods = prod_df.to_dict('records')
 
-    customer_ids = customers_df["customer_id"].tolist()
-    products = products_df.to_dict(orient="records")
-
-    if not customer_ids:
-        raise Exception("❌ No customers found. Seed customers first.")
-    if not products:
-        raise Exception("❌ No products found. Seed products first.")
-
-    # -------------------------
-    # Generate Orders
-    # -------------------------
+    # 1. Create Orders with randomized dates
     orders = []
     for _ in range(NUM_ORDERS):
-        customer_id = random.choice(customer_ids)
-        order_date = datetime.datetime.now() - datetime.timedelta(days=random.randint(0, 365))
-        if random.random() < CORRUPTION_RATE:
-            order_date = random.choice([datetime.datetime.now() + datetime.timedelta(days=365), None])
-
         orders.append({
-            "customer_id": customer_id,
-            "order_date": order_date,
-            "total_amount": 0,  # placeholder
-            "status": random.choice(["Pending", "Paid", "Shipped", "Cancelled"])
+            "customer_id": random.choice(cust_ids),
+            "order_date": get_random_date(start_date, end_date), # Added random date
+            "total_amount": 0,
+            "status": random.choice(["Paid", "Paid", "Paid", "Refunded"]) # Added status variety
         })
+    
+    pd.DataFrame(orders).to_sql("Orders", engine, if_exists="append", index=False)
 
-    orders_df = pd.DataFrame(orders)
-    orders_df.to_sql("Orders", engine, if_exists="append", index=False)
-    print("🧾 Orders inserted:", len(orders_df))
-
-    inserted_orders = pd.read_sql(
-        f"SELECT TOP ({NUM_ORDERS}) order_id, customer_id, order_date FROM Orders ORDER BY order_id DESC",
-        engine
-    ).sort_values("order_id")
-
-    # -------------------------
-    # Generate OrderItems in memory
-    # -------------------------
-    order_items = []
-    order_totals = {}  # key=order_id, value=total_amount
-
-    for _, order_row in inserted_orders.iterrows():
-        order_id = order_row["order_id"]
-        num_items = random.randint(1, 5)
-        chosen_products = random.sample(products, num_items)
-
-        total_amount = 0
-        for p in chosen_products:
-            price = p["price"]
-            quantity = random.randint(1, 3)
-
-            # corruption but always valid (>0)
-            if random.random() < CORRUPTION_RATE:
-                quantity = max(1, quantity + random.choice([-1, 0, 1]))
-                price = max(0.01, price * random.uniform(0.5, 2))
-
-            total_amount += price * quantity
-
-            order_items.append({
-                "order_id": order_id,
-                "product_id": p["product_id"],
-                "quantity": quantity,
-                "price": round(price, 2)
+    # 2. Get the generated IDs (Ordering by order_id to map correctly)
+    order_ids = pd.read_sql(f"SELECT TOP {NUM_ORDERS} order_id FROM Orders ORDER BY order_id DESC", engine)["order_id"].tolist()
+    
+    items = []
+    for oid in order_ids:
+        # Determine number of unique items (1 to 5)
+        num_items = random.randint(1, 5) 
+        selected_prods = random.sample(prods, num_items)
+        
+        for p in selected_prods:
+            items.append({
+                "order_id": oid, 
+                "product_id": p["product_id"], 
+                "quantity": random.randint(1, 3), 
+                "price": p["price"]
             })
+    
+    pd.DataFrame(items).to_sql("OrderItems", engine, if_exists="append", index=False)
+    logging.info(f"🧾 Inserted {NUM_ORDERS} orders spread across 2 years.")
 
-        order_totals[order_id] = round(total_amount, 2)
-
-    # -------------------------
-    # Insert all OrderItems at once
-    # -------------------------
-    items_df = pd.DataFrame(order_items)
-    items_df.to_sql("OrderItems", engine, if_exists="append", index=False)
-    print("🧺 OrderItems inserted:", len(items_df))
-
-    # -------------------------
-    # Bulk update total_amounts in one query
-    # -------------------------
-    if order_totals:
-        case_sql = " ".join(
-            f"WHEN {oid} THEN {amt}" for oid, amt in order_totals.items()
-        )
-        update_sql = f"""
-        UPDATE Orders
-        SET total_amount = CASE order_id
-            {case_sql}
-            ELSE total_amount
-        END
-        WHERE order_id IN ({','.join(str(oid) for oid in order_totals.keys())})
-        """
-        with engine.begin() as conn:
-            conn.execute(text(update_sql))
-
-    return orders_df, items_df
+def update_order_totals(engine):
+    """Calculates the sum of items and updates the Orders table."""
+    update_query = """
+    UPDATE O
+    SET O.total_amount = Sub.CalculatedTotal
+    FROM Orders O
+    INNER JOIN (
+        SELECT order_id, SUM(price * quantity) as CalculatedTotal
+        FROM OrderItems
+        GROUP BY order_id
+    ) Sub ON O.order_id = Sub.order_id
+    """
+    with engine.begin() as conn:
+        conn.execute(text(update_query))
+    logging.info("💰 Synchronized Order total_amount with OrderItems.")
 
 # -----------------------------
 # MAIN
 # -----------------------------
 def seed_database():
     engine = get_engine()
-    print("🔌 Connected to DB")
+    
+    # 1. Report Initial State
+    log_db_state(engine, "INITIAL DB STATE")
 
-    clear_tables(engine)
+    # 2. Wipe and Rebuild
+    logging.info("🧹 Wiping tables...")
+    drop_tables(engine)
+    log_db_state(engine, "STATE AFTER DROP")
 
-    cust_df = seed_customers(engine)
-    prod_df = seed_products(engine)
-    orders_df, items_df = seed_orders_and_items(engine)
+    logging.info("🏗️ Building schema...")
+    execute_schema(engine)
+    log_db_state(engine, "STATE AFTER SCHEMA CREATION")
 
-    print("\n🎉 Seeding complete!")
-    print("Customers:", len(cust_df))
-    print("Products:", len(prod_df))
-    print("Orders:", len(orders_df))
-    print("OrderItems:", len(items_df))
+    # 3. Seed
+    seed_customers(engine)
+    seed_products(engine)
+    seed_orders_and_items(engine)
 
-def lambda_handler(event, context):
-    """
-    AWS Lambda entry point.
-    """
-    seed_database()
-    return {"status": "success"}
+    # NEW: Sync the totals
+    update_order_totals(engine)
 
+    # 4. Final State
+    log_db_state(engine, "FINAL DB STATE")
+    logging.info("🎉 Seeding complete!")
 
 if __name__ == "__main__":
     seed_database()

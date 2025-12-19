@@ -16,3 +16,6 @@ lambda_build/*/
 lambda_build/.DS_Store
 
 *.zip
+
+*/dist
+*/build

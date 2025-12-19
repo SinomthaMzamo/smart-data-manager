@@ -6,27 +6,31 @@ import azure.functions as func
 import logging
 import sys
 import os
+import datetime
 
-# Fix the path - in Azure, smart_data_manager_package is in parent directory
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# Import existing ETL code
-from smart_data_manager_package.extract import extract_table
-from smart_data_manager_package.transform import transform_all
-from smart_data_manager_package.load import load_transformed_schema
-from smart_data_manager_package.powerBI.daily_sales_etl import run_daily_sales_etl
-
+# Import existing ETL code - use absolute imports
+from smart_data_manager.extract import extract_table
+from smart_data_manager.transform import transform_all
+from smart_data_manager.load import load_transformed_schema
+from smart_data_manager.daily_sales_etl import run_daily_sales_etl
 
 def main(mytimer: func.TimerRequest) -> None:
     """
     Azure Function triggered by timer
     This runs the full ETL pipeline on a schedule
     """
-    utc_timestamp = func.datetime.utcnow().isoformat()
-    
+
+    utc_timestamp = datetime.datetime.now(datetime.UTC).isoformat()
+
     logging.info('='*60)
     logging.info(f'ETL Function triggered at {utc_timestamp}')
     logging.info('='*60)
+    
+    # Log environment info for debugging
+    logging.info(f"Python version: {sys.version}")
+    logging.info(f"Working directory: {os.getcwd()}")
+    logging.info(f"DB_SERVER present: {os.getenv('DB_SERVER') is not None}")
     
     try:
         # Run main ETL pipeline
@@ -38,6 +42,15 @@ def main(mytimer: func.TimerRequest) -> None:
         products_df = extract_table("Products")
         orders_df = extract_table("Orders")
         order_items_df = extract_table("OrderItems")
+        
+        if customers_df.empty:
+            logging.warning("Customers table is empty")
+        if products_df.empty:
+            logging.warning("Products table is empty")
+        if orders_df.empty:
+            logging.warning("Orders table is empty")
+        if order_items_df.empty:
+            logging.warning("OrderItems table is empty")
         
         # Transform
         logging.info("Transforming data...")
